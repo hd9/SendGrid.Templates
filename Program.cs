@@ -13,15 +13,12 @@ namespace SendGrid.Templates
         {
             try
             {
-                Bar();
-                Log("SendGrid Template Migration Tool");
-                Bar();
+                Header("SendGrid Template Migration Tool");
 
                 new Parser(p => { p.EnableDashDash = false; p.HelpWriter = Console.Out; p.CaseSensitive = true; })
                     .ParseArguments<Options>(args)
-                    .MapResult(
-                      (Options opts) => Run(opts),
-                      errs => 1);
+                    .WithParsed(o => o.Op = o.Save ? Op.Save : Op.Transfer)
+                    .MapResult((Options opts) => Run(opts), errs => 1);
             }
             catch (Exception e)
             {
@@ -31,12 +28,15 @@ namespace SendGrid.Templates
 
         private static int Run(Options o)
         {
-            var sg = new SendGridOperation(o.SrcToken, o.DstToken);
+            var sg = new SendGridOperation(o.FromKey, o.ToKey);
 
             switch (o.Op)
             {
                 case Op.Transfer:
                     sg.TransferTemplates();
+                    break;
+                case Op.Save:
+                    sg.SaveTemplates(o.Regex);
                     break;
             }
 
@@ -75,6 +75,12 @@ namespace SendGrid.Templates
         {
             Console.WriteLine("----------------------------------");
         }
-        
+
+        private static void Header(string name)
+        {
+            Bar();
+            Log(name);
+            Bar();
+        }
     }
 }

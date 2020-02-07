@@ -1,11 +1,9 @@
 ﻿using Newtonsoft.Json;
 using System;
-using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net;
-using System.Security.Cryptography.X509Certificates;
-using System.Text;
-using System.Threading.Tasks;
+using System.Text.RegularExpressions;
 
 namespace SendGrid.Templates
 {
@@ -16,19 +14,23 @@ namespace SendGrid.Templates
         #region Attributes
         private readonly SendGridClient sgSrc;
         private readonly SendGridClient sgDst;
-        const int pad = 70;
+        const int pad = 80;
+        const string outDir = "out";
         #endregion
 
         #region ctor
         public SendGridOperation(string srcToken, string dstToken)
         {
-            Logg($"  - Connecting to the SendGrid source account: ");
+            Logg($"- Connecting to the SendGrid source account: ", postpend: pad - 27);
             sgSrc = new SendGridClient(srcToken);
             Ok();
 
-            Logg($"  - Connecting to the SendGrid destination account: ");
-            sgDst = new SendGridClient(dstToken);
-            Ok();
+            if (!string.IsNullOrEmpty(dstToken))
+            {
+                Logg($"- Connecting to the SendGrid destination account: ");
+                sgDst = new SendGridClient(dstToken);
+                Ok();
+            }
         }
         #endregion
 
@@ -37,9 +39,15 @@ namespace SendGrid.Templates
         {
             try
             {
-                // get all templates
                 var templates = GetTemplates();
-                CreateTemplates(templates.Templates);
+                if (templates == null || templates.Templates == null || !templates.Templates.Any())
+                {
+                    Log("No templates found to process.");
+                    return;
+                }
+
+                Log("- Creating templates: ", 2);
+                templates.Templates.ForEach(t => CreateTemplate(t));
 
                 Log($"\nFinished! {templates.Templates.Sum(x => x.Versions.Count())} transactional templates created");
             }
@@ -48,21 +56,63 @@ namespace SendGrid.Templates
                 Log(e);
             }
         }
+
+        /// <summary>
+        /// Saves transaction email templates on disk.
+        /// </summary>
+        public void SaveTemplates(string regex)
+        {
+            try
+            {
+                var templates = GetTemplates();
+                if (templates == null || templates.Templates == null || !templates.Templates.Any())
+                {
+                    Log("No templates found to process.");
+                    return;
+                }
+
+                Log("- Saving templates: ", 2);
+                if (Directory.Exists(outDir)) Directory.Delete(outDir, true);
+                Directory.CreateDirectory(outDir);
+
+                templates.Templates.ForEach(t =>
+                {
+                    try
+                    {
+                        var v = t.Versions.FirstOrDefault();
+                        if (v == null)
+                            return;
+
+                        var fname = ParseName(v.Name, regex);
+                        File.WriteAllText($"{outDir}/{fname}.html", v.Html_content);
+                    }
+                    catch (Exception e)
+                    {
+                        Log(e);
+                    }
+                });
+
+                Log($"- {templates.Templates.Count} templates successfully on the '{outDir}' directory.", 5);
+            }
+            catch (Exception e)
+            {
+                Log(e);
+            }
+        }
+
         #endregion
 
         #region Private Members
-
-        private void CreateTemplates(List<Template> templates)
-        {
-            Log("  - Creating templates: ");
-            templates.ForEach(t => CreateTemplate(t));
-
-        }
-
-        // https://github.com/sendgrid/sendgrid-csharp/blob/master/USAGE.md#retrieve-all-transactional-templates
+        
+        /// <summary>
+        /// Downloads all transaction SendGrid Email templates
+        ///  Docs: https://github.com/sendgrid/sendgrid-csharp/blob/master/USAGE.md#retrieve-all-transactional-templates
+        /// </summary>
+        /// <param name="loadVersions"></param>
+        /// <returns></returns>
         private TemplateData GetTemplates(bool loadVersions = true)
         {
-            Logg("  - Getting all templates: ");
+            Logg("- Getting all templates: ", postpend: pad - 7);
             var response = sgSrc.RequestAsync(method: SendGridClient.Method.GET, urlPath: "templates?generations=dynamic").GetAwaiter().GetResult();
 
             if (response.StatusCode != HttpStatusCode.OK)
@@ -82,28 +132,38 @@ namespace SendGrid.Templates
             return templates;
         }
 
-        // https://github.com/sendgrid/sendgrid-csharp/blob/master/USAGE.md#create-a-transactional-template
+        /// <summary>
+        /// Creates a new transaction email template on SendGrid
+        /// Docs: https://github.com/sendgrid/sendgrid-csharp/blob/master/USAGE.md#create-a-transactional-template
+        /// </summary>
+        /// <param name="t"></param>
         private void CreateTemplate(Template t)
         {
             if (t == null)
                 return;
 
+            if (sgDst == null)
+            {
+                Log("ERROR: Couldn't establish a connection to the target SendGrid account. Please provide a valid api key and retry.");
+                return;
+            }
+
             try
             {
-                Logg($"     - Creating template {t.Name.PadRight(pad)} ");
-                var data = JsonConvert.DeserializeObject<Object>($"{{ 'name': '{t.Name }', 'generation': 'dynamic' }}").ToString();
+                Logg($"- Creating template {t.Name}", 5, pad);
+                var data = JsonConvert.DeserializeObject($"{{ 'name': '{t.Name }', 'generation': 'dynamic' }}").ToString();
                 var resp = sgDst.RequestAsync(method: SendGridClient.Method.POST, urlPath: "templates", requestBody: data).GetAwaiter().GetResult();
                 var r = resp.Body.ReadAsStringAsync().Result;
                 var tResp = JsonConvert.DeserializeObject<Template>(r);
                 Ok();
 
-                var vSource = t.Versions.FirstOrDefault();
-                if (vSource == null)
+                var v = t.Versions.FirstOrDefault();
+                if (v == null)
                     return;
 
-                Logg($"       - Creating version ");
-                vSource.Template_id = tResp.Id;
-                data = JsonConvert.SerializeObject(vSource);
+                Logg($"- Creating version ", 7);
+                v.Template_id = tResp.Id;
+                data = JsonConvert.SerializeObject(v);
                 resp = sgDst.RequestAsync(method: SendGridClient.Method.POST, urlPath: $"templates/{tResp.Id}/versions", requestBody: data).GetAwaiter().GetResult();
                 r = resp.Body.ReadAsStringAsync().Result;
                 var vResp = JsonConvert.DeserializeObject<Version>(r);
@@ -122,7 +182,7 @@ namespace SendGrid.Templates
 
             try
             {
-                Logg($"     - Downloading {v.Name.PadRight(pad)} ");
+                Logg($"- Downloading {v.Name.PadRight(pad)} ", 5);
                 var response = sgSrc.RequestAsync(method: SendGridClient.Method.GET, urlPath: $"templates/{v.Template_id}").GetAwaiter().GetResult();
                 Ok();
 
@@ -141,15 +201,19 @@ namespace SendGrid.Templates
                 Log(e);
             }
         }
-
-        private void Log(string log)
+        private object ParseName(string name, string regex)
         {
-            Console.WriteLine(log);
+            return string.IsNullOrEmpty(regex) ? name : Regex.Match(name, regex).Value;
         }
 
-        private void Logg(string log)
+        private void Log(string log, int prepend = 0)
         {
-            Console.Write(log);
+            Console.WriteLine($"{"".PadLeft(prepend)}{log}");
+        }
+
+        private void Logg(string log, int prepend = 2, int postpend = 0)
+        {
+            Console.Write($"{"".PadLeft(prepend)}{log}{"".PadRight(postpend)}");
         }
 
         private void Ok()
@@ -161,7 +225,7 @@ namespace SendGrid.Templates
         {
             Console.ForegroundColor = ConsoleColor.Red;
             Log("\n");
-            Console.WriteLine(e);
+            Console.Error.WriteLine(e);
             Console.ForegroundColor = ConsoleColor.Gray;
         }
         #endregion 
